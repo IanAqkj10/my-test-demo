@@ -1,0 +1,1305 @@
+// ==================== 1. 审计注解 ====================
+
+/**
+ * 标记需要审计的方法
+ */
+@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface AuditLog {
+    String module() default ""; // 模块名称
+    String operation() default ""; // 操作描述
+}
+
+/**
+ * 标记需要审计的字段
+ */
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface AuditField {
+    String label(); // 字段中文名（必填）
+    boolean ignore() default false; // 是否忽略
+    int order() default 999; // 显示顺序
+    
+    // 枚举映射：key-value方式
+    String[] enums() default {}; // 格式：{"1:待生成", "2:已生成", "3:已取消"}
+    
+    // 枚举类映射：关联到枚举类
+    Class<? extends Enum<?>> enumClass() default NullEnum.class;
+    
+    // 日期格式化
+    String dateFormat() default "yyyy-MM-dd HH:mm:ss"; // 日期格式
+    
+    // 集合分隔符（用于基本类型集合显示）
+    String listSeparator() default "、"; // 列表元素分隔符
+}
+
+/**
+ * 标记列表项的唯一标识字段（用于对比新增、修改、删除）
+ */
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface AuditId {
+}
+
+/**
+ * 标记子对象或子列表（可选，不标记则不对比）
+ */
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface AuditNested {
+    String value() default ""; // 简写：中文名称
+    String label() default ""; // 完整写法：中文名称（与value二选一）
+}
+
+/**
+ * 枚举转换接口 - 枚举类需要实现此接口
+ */
+public interface AuditEnum {
+    /**
+     * 获取枚举的值（用于对比）
+     */
+    Object getValue();
+    
+    /**
+     * 获取枚举的描述（用于显示）
+     */
+    String getDesc();
+}
+
+/**
+ * 空枚举（用于默认值）
+ */
+enum NullEnum implements AuditEnum {
+    ;
+    @Override
+    public Object getValue() { return null; }
+    @Override
+    public String getDesc() { return null; }
+}
+
+// ==================== 2. 审计日志实体 ====================
+
+@Entity
+@Table(name = "audit_log")
+@Data
+public class AuditLogEntity {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(name = "module")
+    private String module; // 模块
+    
+    @Column(name = "operation")
+    private String operation; // 操作
+    
+    @Column(name = "business_id")
+    private String businessId; // 业务ID
+    
+    @Column(name = "changes", columnDefinition = "JSON")
+    private String changes; // 变更内容JSON（List<String>）
+    
+    @Column(name = "operator")
+    private String operator;
+    
+    @Column(name = "operate_time")
+    private LocalDateTime operateTime;
+    
+    @Column(name = "ip_address")
+    private String ipAddress;
+}
+
+@Repository
+public interface AuditLogRepository extends JpaRepository<AuditLogEntity, Long> {
+    List<AuditLogEntity> findByBusinessIdOrderByOperateTimeDesc(String businessId);
+}
+
+// ==================== 3. 示例实体 ====================
+
+/**
+ * 订单状态枚举 - 实现AuditEnum接口
+ */
+@Getter
+@AllArgsConstructor
+public enum OrderStatus implements AuditEnum {
+    PENDING(1, "待生成"),
+    GENERATED(2, "已生成"),
+    CANCELLED(3, "已取消"),
+    COMPLETED(4, "已完成");
+    
+    private final Integer value;
+    private final String desc;
+    
+    @Override
+    public Object getValue() {
+        return value;
+    }
+    
+    @Override
+    public String getDesc() {
+        return desc;
+    }
+    
+    // 根据value查找枚举
+    public static OrderStatus fromValue(Integer value) {
+        if (value == null) return null;
+        for (OrderStatus status : values()) {
+            if (status.value.equals(value)) {
+                return status;
+            }
+        }
+        return null;
+    }
+}
+
+/**
+ * 支付方式枚举
+ */
+@Getter
+@AllArgsConstructor
+public enum PaymentMethod implements AuditEnum {
+    ALIPAY("alipay", "支付宝"),
+    WECHAT("wechat", "微信支付"),
+    BANK_CARD("bank", "银行卡");
+    
+    private final String value;
+    private final String desc;
+    
+    @Override
+    public Object getValue() {
+        return value;
+    }
+    
+    @Override
+    public String getDesc() {
+        return desc;
+    }
+}
+
+@Data
+public class Order {
+    @AuditField(label = "订单ID", order = 1)
+    private Long id;
+    
+    @AuditField(label = "订单编号", order = 2)
+    private String orderNo;
+    
+    @AuditField(label = "订单金额", order = 3)
+    private BigDecimal amount;
+    
+    // 方式1：使用enums属性直接映射
+    @AuditField(label = "订单状态", order = 4, 
+                enums = {"1:待生成", "2:已生成", "3:已取消", "4:已完成"})
+    private Integer status;
+    
+    // 方式2：使用enumClass关联枚举类（推荐）
+    @AuditField(label = "支付方式", order = 5, enumClass = PaymentMethod.class)
+    private String paymentMethod;
+    
+    // 日期字段 - 使用默认格式 yyyy-MM-dd HH:mm:ss
+    @AuditField(label = "创建时间", order = 6)
+    private Date createTime;
+    
+    // 日期字段 - 自定义格式
+    @AuditField(label = "支付时间", order = 7, dateFormat = "yyyy-MM-dd HH:mm")
+    private Date payTime;
+    
+    // LocalDateTime也支持
+    @AuditField(label = "更新时间", order = 8, dateFormat = "yyyy年MM月dd日 HH:mm:ss")
+    private LocalDateTime updateTime;
+    
+    // ========== 基本类型集合 - 自动识别，只需要@AuditField ==========
+    
+    // List<String> - 只需要一个注解
+    @AuditField(label = "订单标签")
+    private List<String> tags;
+    
+    // List<Integer> 带枚举映射 - 只需要一个注解
+    @AuditField(label = "配送方式", enums = {"1:快递", "2:自提", "3:同城配送"})
+    private List<Integer> deliveryMethods;
+    
+    // List<Long> - 只需要一个注解
+    @AuditField(label = "关联订单ID")
+    private List<Long> relatedOrderIds;
+    
+    // List<String> 自定义分隔符
+    @AuditField(label = "备注", listSeparator = "；")
+    private List<String> remarks;
+    
+    // ========== 对象和对象列表 - 需要@AuditNested ==========
+    
+    // 方式1：使用value简写
+    @AuditNested("收货地址")
+    private Address address;
+    
+    // 方式2：使用label（效果相同）
+    @AuditNested(label = "订单明细")
+    private List<OrderItem> items;
+    
+    // 更多嵌套示例
+    @AuditNested("发票信息")
+    private Invoice invoice;
+    
+    @AuditNested("优惠券")
+    private List<Coupon> coupons;
+}
+
+@Data
+public class Address {
+    @AuditField(label = "收货人")
+    private String receiver;
+    
+    @AuditField(label = "联系电话")
+    private String phone;
+    
+    @AuditField(label = "详细地址")
+    private String detail;
+}
+
+@Data
+public class OrderItem {
+    @AuditId  // 标记为唯一标识字段
+    @AuditField(label = "商品ID")
+    private Long productId;
+    
+    @AuditField(label = "商品名称")
+    private String productName;
+    
+    @AuditField(label = "数量")
+    private Integer quantity;
+    
+    @AuditField(label = "单价")
+    private BigDecimal price;
+    
+    // 不再需要重写equals和hashCode
+}
+
+// ==================== 4. 审计切面 ====================
+
+@Aspect
+@Component
+@Slf4j
+public class AuditLogAspect {
+    
+    @Autowired
+    private AuditLogRepository auditLogRepository;
+    
+    @Autowired
+    private ObjectMapper objectMapper;
+    
+    @Autowired
+    private HttpServletRequest request;
+    
+    /**
+     * 环绕通知 - 拦截带@AuditLog注解的方法
+     */
+    @Around("@annotation(auditLog)")
+    public Object around(ProceedingJoinPoint joinPoint, AuditLog auditLog) throws Throwable {
+        // 获取方法参数
+        Object[] args = joinPoint.getArgs();
+        Object oldEntity = null;
+        Object newEntity = null;
+        String businessId = null;
+        
+        // 解析参数（假设第一个是ID或旧对象，第二个是新对象）
+        if (args.length >= 2) {
+            if (args[0] instanceof Number) {
+                // 第一个参数是ID，需要先查询旧对象
+                businessId = args[0].toString();
+                newEntity = args[1];
+                // 这里需要在方法执行前获取旧对象
+                oldEntity = getOldEntityBeforeUpdate(joinPoint, args[0]);
+            } else {
+                // 第一个参数是旧对象
+                oldEntity = args[0];
+                newEntity = args[1];
+                businessId = getBusinessId(newEntity);
+            }
+        }
+        
+        // 执行目标方法
+        Object result = joinPoint.proceed();
+        
+        // 记录审计日志
+        try {
+            if (oldEntity != null && newEntity != null) {
+                List<String> changes = compareObjects(oldEntity, newEntity, "");
+                if (!changes.isEmpty()) {
+                    saveAuditLog(auditLog, businessId, changes);
+                }
+            }
+        } catch (Exception e) {
+            log.error("记录审计日志失败", e);
+        }
+        
+        return result;
+    }
+    
+    /**
+     * 对比两个对象，生成变更描述列表
+     */
+    private List<String> compareObjects(Object oldObj, Object newObj, String prefix) {
+        List<String> changes = new ArrayList<>();
+        
+        if (oldObj == null || newObj == null) {
+            return changes;
+        }
+        
+        try {
+            Class<?> clazz = oldObj.getClass();
+            Field[] fields = getAllFields(clazz);
+            
+            // 按order排序
+            Arrays.sort(fields, (f1, f2) -> {
+                AuditField a1 = f1.getAnnotation(AuditField.class);
+                AuditField a2 = f2.getAnnotation(AuditField.class);
+                int order1 = a1 != null ? a1.order() : 999;
+                int order2 = a2 != null ? a2.order() : 999;
+                return Integer.compare(order1, order2);
+            });
+            
+            for (Field field : fields) {
+                field.setAccessible(true);
+                
+                // 处理普通字段
+                AuditField auditField = field.getAnnotation(AuditField.class);
+                if (auditField != null && !auditField.ignore()) {
+                    Object oldValue = field.get(oldObj);
+                    Object newValue = field.get(newObj);
+                    
+                    // 判断是否为List类型
+                    if (oldValue instanceof List || newValue instanceof List) {
+                        List<?> oldList = oldValue instanceof List ? (List<?>) oldValue : new ArrayList<>();
+                        List<?> newList = newValue instanceof List ? (List<?>) newValue : new ArrayList<>();
+                        
+                        // 自动判断是否为基本类型列表
+                        if (isSimpleTypeList(oldList, newList)) {
+                            // 基本类型列表对比
+                            List<String> listChanges = compareSimpleList(oldList, newList, auditField);
+                            changes.addAll(listChanges);
+                            continue; // 跳过后续处理
+                        }
+                    }
+                    
+                    // 普通字段对比
+                    if (!Objects.equals(oldValue, newValue)) {
+                        String fieldLabel = prefix.isEmpty() ? auditField.label() : prefix + auditField.label();
+                        String change = String.format("%s由[%s]变成[%s]", 
+                            fieldLabel, 
+                            formatValue(oldValue, auditField), 
+                            formatValue(newValue, auditField));
+                        changes.add(change);
+                    }
+                }
+                
+                // 处理嵌套对象（只有@AuditNested注解才处理）
+                AuditNested auditNested = field.getAnnotation(AuditNested.class);
+                if (auditNested != null) {
+                    String nestedLabel = getNestedLabel(auditNested);
+                    Object oldNested = field.get(oldObj);
+                    Object newNested = field.get(newObj);
+                    
+                    if (oldNested instanceof List && newNested instanceof List) {
+                        // 对象列表对比（已经是对象了，不是基本类型）
+                        List<?> oldList = (List<?>) oldNested;
+                        List<?> newList = (List<?>) newNested;
+                        List<String> listChanges = compareList(oldList, newList, nestedLabel);
+                        changes.addAll(listChanges);
+                    } else {
+                        // 单个嵌套对象
+                        String nestedPrefix = prefix + nestedLabel + "的";
+                        List<String> nestedChanges = compareObjects(oldNested, newNested, nestedPrefix);
+                        changes.addAll(nestedChanges);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("对比对象失败", e);
+        }
+        
+        return changes;
+    }
+    
+    /**
+     * 判断是否为基本类型列表
+     */
+    private boolean isSimpleTypeList(List<?> oldList, List<?> newList) {
+        List<?> checkList = !oldList.isEmpty() ? oldList : newList;
+        if (checkList.isEmpty()) {
+            return false;
+        }
+        
+        Object first = checkList.get(0);
+        if (first == null) {
+            return false;
+        }
+        
+        // 判断是否为基本类型或包装类
+        Class<?> clazz = first.getClass();
+        return clazz == String.class
+            || clazz == Integer.class
+            || clazz == Long.class
+            || clazz == Double.class
+            || clazz == Float.class
+            || clazz == Boolean.class
+            || clazz == BigDecimal.class
+            || clazz.isPrimitive();
+    }
+    
+    /**
+     * 对比基本类型列表（List<String>、List<Integer>等）
+     */
+    private List<String> compareSimpleList(List<?> oldList, List<?> newList, AuditField auditField) {
+        List<String> changes = new ArrayList<>();
+        
+        if (oldList == null) oldList = new ArrayList<>();
+        if (newList == null) newList = new ArrayList<>();
+        
+        // 转换为Set便于对比
+        Set<String> oldSet = oldList.stream()
+            .map(item -> formatSimpleValue(item, auditField))
+            .collect(Collectors.toSet());
+        Set<String> newSet = newList.stream()
+            .map(item -> formatSimpleValue(item, auditField))
+            .collect(Collectors.toSet());
+        
+        // 找出新增的元素
+        Set<String> added = new HashSet<>(newSet);
+        added.removeAll(oldSet);
+        if (!added.isEmpty()) {
+            String separator = auditField.listSeparator();
+            String addedStr = String.join(separator, added);
+            changes.add(String.format("%s新增：%s", auditField.label(), addedStr));
+        }
+        
+        // 找出删除的元素
+        Set<String> removed = new HashSet<>(oldSet);
+        removed.removeAll(newSet);
+        if (!removed.isEmpty()) {
+            String separator = auditField.listSeparator();
+            String removedStr = String.join(separator, removed);
+            changes.add(String.format("%s删除：%s", auditField.label(), removedStr));
+        }
+        
+        // 如果整个列表完全替换（且不为空）
+        if (added.isEmpty() && removed.isEmpty() && !oldSet.equals(newSet)) {
+            String separator = auditField.listSeparator();
+            String oldStr = String.join(separator, oldSet);
+            String newStr = String.join(separator, newSet);
+            changes.add(String.format("%s由[%s]变成[%s]", auditField.label(), oldStr, newStr));
+        }
+        
+        return changes;
+    }
+    
+    /**
+     * 格式化基本类型值（支持枚举转换）
+     */
+    private String formatSimpleValue(Object value, AuditField auditField) {
+        if (value == null) {
+            return "空";
+        }
+        
+        // 如果有枚举映射，进行转换
+        if (auditField != null) {
+            if (auditField.enums().length > 0) {
+                String enumValue = value.toString();
+                for (String enumPair : auditField.enums()) {
+                    String[] parts = enumPair.split(":", 2);
+                    if (parts.length == 2 && parts[0].equals(enumValue)) {
+                        return parts[1];
+                    }
+                }
+            }
+            
+            if (auditField.enumClass() != NullEnum.class) {
+                try {
+                    Class<? extends Enum<?>> enumClass = auditField.enumClass();
+                    if (AuditEnum.class.isAssignableFrom(enumClass)) {
+                        Enum<?>[] enumConstants = enumClass.getEnumConstants();
+                        for (Enum<?> enumConstant : enumConstants) {
+                            AuditEnum auditEnum = (AuditEnum) enumConstant;
+                            if (Objects.equals(auditEnum.getValue(), value)) {
+                                return auditEnum.getDesc();
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    log.error("枚举转换失败", e);
+                }
+            }
+        }
+        
+        return value.toString();
+    }
+    
+    /**
+     * 对比对象列表 - 基于ID精确对比
+     */
+    private List<String> compareList(List<?> oldList, List<?> newList, String itemLabel) {
+        List<String> changes = new ArrayList<>();
+        
+        if (oldList == null) oldList = new ArrayList<>();
+        if (newList == null) newList = new ArrayList<>();
+        
+        // 转换为Map，key为ID，value为对象
+        Map<Object, Object> oldMap = new LinkedHashMap<>();
+        Map<Object, Object> newMap = new LinkedHashMap<>();
+        
+        for (Object item : oldList) {
+            Object id = getItemId(item);
+            if (id != null) {
+                oldMap.put(id, item);
+            }
+        }
+        
+        for (Object item : newList) {
+            Object id = getItemId(item);
+            if (id != null) {
+                newMap.put(id, item);
+            } else {
+                // ID为null，视为新增项
+                String itemDesc = buildItemDescription(item);
+                changes.add(String.format("新增%s：%s", itemLabel, itemDesc));
+            }
+        }
+        
+        // 1. 找出新增的项（新列表有ID，旧列表没有该ID）
+        for (Map.Entry<Object, Object> entry : newMap.entrySet()) {
+            Object id = entry.getKey();
+            if (!oldMap.containsKey(id)) {
+                String itemDesc = buildItemDescription(entry.getValue());
+                changes.add(String.format("新增%s：%s", itemLabel, itemDesc));
+            }
+        }
+        
+        // 2. 找出删除的项（旧列表有ID，新列表没有该ID）
+        for (Map.Entry<Object, Object> entry : oldMap.entrySet()) {
+            Object id = entry.getKey();
+            if (!newMap.containsKey(id)) {
+                String itemDesc = buildItemDescription(entry.getValue());
+                changes.add(String.format("删除%s：%s", itemLabel, itemDesc));
+            }
+        }
+        
+        // 3. 找出修改的项（新旧列表都有相同ID）
+        for (Map.Entry<Object, Object> entry : newMap.entrySet()) {
+            Object id = entry.getKey();
+            if (oldMap.containsKey(id)) {
+                Object oldItem = oldMap.get(id);
+                Object newItem = entry.getValue();
+                
+                // 对比该项的每个字段
+                List<String> itemChanges = compareListItem(oldItem, newItem, itemLabel);
+                changes.addAll(itemChanges);
+            }
+        }
+        
+        return changes;
+    }
+    
+    /**
+     * 对比列表中单个项的字段变化
+     */
+    private List<String> compareListItem(Object oldItem, Object newItem, String itemLabel) {
+        List<String> changes = new ArrayList<>();
+        
+        try {
+            Class<?> clazz = oldItem.getClass();
+            Field[] fields = getAllFields(clazz);
+            
+            // 按order排序
+            Arrays.sort(fields, (f1, f2) -> {
+                AuditField a1 = f1.getAnnotation(AuditField.class);
+                AuditField a2 = f2.getAnnotation(AuditField.class);
+                int order1 = a1 != null ? a1.order() : 999;
+                int order2 = a2 != null ? a2.order() : 999;
+                return Integer.compare(order1, order2);
+            });
+            
+            // 获取该项的标识信息（用于描述是哪一项）
+            String itemIdentifier = buildItemIdentifier(newItem);
+            
+            for (Field field : fields) {
+                field.setAccessible(true);
+                
+                // 跳过被@AuditId标注的字段（ID不需要对比变化）
+                if (field.isAnnotationPresent(AuditId.class)) {
+                    continue;
+                }
+                
+                // 跳过常规ID字段（兼容旧代码）
+                if (field.getName().equals("id") || field.getName().endsWith("Id")) {
+                    continue;
+                }
+                
+                AuditField auditField = field.getAnnotation(AuditField.class);
+                if (auditField != null && !auditField.ignore()) {
+                    Object oldValue = field.get(oldItem);
+                    Object newValue = field.get(newItem);
+                    
+                    if (!Objects.equals(oldValue, newValue)) {
+                        String change = String.format("%s【%s】的%s由[%s]变成[%s]", 
+                            itemLabel,
+                            itemIdentifier,
+                            auditField.label(), 
+                            formatValue(oldValue, auditField), 
+                            formatValue(newValue, auditField));
+                        changes.add(change);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("对比列表项失败", e);
+        }
+        
+        return changes;
+    }
+    
+    /**
+     * 获取@AuditNested的label值
+     */
+    private String getNestedLabel(AuditNested auditNested) {
+        // 优先使用value（简写）
+        if (!auditNested.value().isEmpty()) {
+            return auditNested.value();
+        }
+        // 其次使用label
+        if (!auditNested.label().isEmpty()) {
+            return auditNested.label();
+        }
+        return "项";
+    }
+    
+    /**
+     * 获取列表项的ID值（作为唯一标识）- 优先使用@AuditId注解标记的字段
+     */
+    private Object getItemId(Object item) {
+        if (item == null) {
+            return null;
+        }
+        
+        try {
+            Field[] fields = getAllFields(item.getClass());
+            
+            // 1. 优先查找被@AuditId标注的字段
+            for (Field field : fields) {
+                if (field.isAnnotationPresent(AuditId.class)) {
+                    field.setAccessible(true);
+                    Object value = field.get(item);
+                    if (value != null) {
+                        return value;
+                    }
+                }
+            }
+            
+            // 2. 如果没有@AuditId注解，则查找名为"id"的字段（兼容旧代码）
+            try {
+                Field idField = item.getClass().getDeclaredField("id");
+                idField.setAccessible(true);
+                Object value = idField.get(item);
+                if (value != null) {
+                    return value;
+                }
+            } catch (NoSuchFieldException ignored) {
+            }
+            
+            // 3. 最后查找以"Id"结尾的字段（兼容旧代码）
+            for (Field field : fields) {
+                if (field.getName().endsWith("Id")) {
+                    field.setAccessible(true);
+                    Object value = field.get(item);
+                    if (value != null) {
+                        return value;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("获取列表项ID失败", e);
+        }
+        
+        return null;
+    }
+    
+    /**
+     * 构建列表项的标识符（用于在变更描述中标识是哪一项）
+     * 使用ID作为唯一标识，因为其他字段（如name）可能会被修改
+     */
+    private String buildItemIdentifier(Object item) {
+        try {
+            // 直接使用ID作为标识
+            Object id = getItemId(item);
+            if (id != null) {
+                return "ID=" + id;
+            }
+        } catch (Exception e) {
+            log.error("构建项标识符失败", e);
+        }
+        
+        return "未知";
+    }
+    
+    /**
+     * 构建列表项的描述
+     */
+    private String buildItemDescription(Object item) {
+        List<String> parts = new ArrayList<>();
+        try {
+            Field[] fields = getAllFields(item.getClass());
+            for (Field field : fields) {
+                field.setAccessible(true);
+                AuditField auditField = field.getAnnotation(AuditField.class);
+                if (auditField != null && !auditField.ignore()) {
+                    Object value = field.get(item);
+                    if (value != null) {
+                        parts.add(auditField.label() + "=" + formatValue(value, auditField));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("构建项描述失败", e);
+        }
+        return String.join(", ", parts);
+    }
+    
+    /**
+     * 格式化值 - 支持枚举映射和日期格式化
+     */
+    private String formatValue(Object value, AuditField auditField) {
+        if (value == null) {
+            return "空";
+        }
+        
+        // 1. 处理枚举映射（方式1：enums属性）
+        if (auditField.enums().length > 0) {
+            String enumValue = value.toString();
+            for (String enumPair : auditField.enums()) {
+                String[] parts = enumPair.split(":", 2);
+                if (parts.length == 2 && parts[0].equals(enumValue)) {
+                    return parts[1];
+                }
+            }
+        }
+        
+        // 2. 处理枚举映射（方式2：enumClass属性）
+        if (auditField.enumClass() != NullEnum.class) {
+            try {
+                Class<? extends Enum<?>> enumClass = auditField.enumClass();
+                if (AuditEnum.class.isAssignableFrom(enumClass)) {
+                    Enum<?>[] enumConstants = enumClass.getEnumConstants();
+                    for (Enum<?> enumConstant : enumConstants) {
+                        AuditEnum auditEnum = (AuditEnum) enumConstant;
+                        if (Objects.equals(auditEnum.getValue(), value)) {
+                            return auditEnum.getDesc();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.error("枚举转换失败", e);
+            }
+        }
+        
+        // 3. 处理Date类型
+        if (value instanceof Date) {
+            SimpleDateFormat sdf = new SimpleDateFormat(auditField.dateFormat());
+            return sdf.format((Date) value);
+        }
+        
+        // 4. 处理LocalDateTime类型
+        if (value instanceof LocalDateTime) {
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern(auditField.dateFormat());
+            return ((LocalDateTime) value).format(formatter);
+        }
+        
+        // 5. 处理LocalDate类型
+        if (value instanceof LocalDate) {
+            String format = auditField.dateFormat();
+            // 如果格式包含时间部分，只取日期部分
+            if (format.contains("HH")) {
+                format = "yyyy-MM-dd";
+            }
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern(format);
+            return ((LocalDate) value).format(formatter);
+        }
+        
+        // 6. 处理BigDecimal类型
+        if (value instanceof BigDecimal) {
+            return ((BigDecimal) value).toPlainString();
+        }
+        
+        // 7. 处理Boolean类型
+        if (value instanceof Boolean) {
+            return (Boolean) value ? "是" : "否";
+        }
+        
+        // 8. 默认toString
+        return value.toString();
+    }
+    
+    /**
+     * 保存审计日志
+     */
+    private void saveAuditLog(AuditLog auditLog, String businessId, List<String> changes) {
+        try {
+            AuditLogEntity entity = new AuditLogEntity();
+            entity.setModule(auditLog.module());
+            entity.setOperation(auditLog.operation());
+            entity.setBusinessId(businessId);
+            entity.setChanges(objectMapper.writeValueAsString(changes));
+            entity.setOperator(getCurrentUser());
+            entity.setOperateTime(LocalDateTime.now());
+            entity.setIpAddress(getClientIp());
+            
+            auditLogRepository.save(entity);
+            
+            log.info("审计日志：{} - {} [ID:{}] 变更：{}", 
+                auditLog.module(), auditLog.operation(), businessId, changes);
+        } catch (Exception e) {
+            log.error("保存审计日志失败", e);
+        }
+    }
+    
+    private Field[] getAllFields(Class<?> clazz) {
+        List<Field> fields = new ArrayList<>();
+        while (clazz != null && clazz != Object.class) {
+            fields.addAll(Arrays.asList(clazz.getDeclaredFields()));
+            clazz = clazz.getSuperclass();
+        }
+        return fields.toArray(new Field[0]);
+    }
+    
+    private String getCurrentUser() {
+        // 从SecurityContext获取当前用户
+        return "admin"; // 示例
+    }
+    
+    private String getClientIp() {
+        String ip = request.getHeader("X-Forwarded-For");
+        return ip != null && !ip.isEmpty() ? ip : request.getRemoteAddr();
+    }
+    
+    private String getBusinessId(Object entity) {
+        try {
+            Field idField = entity.getClass().getDeclaredField("id");
+            idField.setAccessible(true);
+            Object id = idField.get(entity);
+            return id != null ? id.toString() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+    
+    private Object getOldEntityBeforeUpdate(ProceedingJoinPoint joinPoint, Object id) {
+        // 需要通过Spring上下文获取对应的Repository查询旧对象
+        // 这里简化处理，实际使用时需要根据业务实现
+        return null;
+    }
+}
+
+// ==================== 8. 完整使用示例 ====================
+
+@Service
+public class OrderServiceExample {
+    
+    @Autowired
+    private OrderRepository orderRepository;
+    
+    /**
+     * 示例：修改订单
+     */
+    @AuditLog(module = "订单管理", operation = "修改订单")
+    public Order updateOrder(Long id, Order newOrder) {
+        Order oldOrder = orderRepository.findById(id).orElseThrow();
+        
+        // 假设旧订单数据：
+        // oldOrder.setStatus(1);  // 待生成
+        // oldOrder.setPaymentMethod("alipay");  // 支付宝
+        // oldOrder.setCreateTime(new Date("2024-01-01 10:00:00"));
+        // oldOrder.setItems([
+        //   {productId:1, productName:"iPhone14", quantity:1, price:4999, productStatus:1},
+        //   {productId:2, productName:"AirPods", quantity:2, price:999, productStatus:1}
+        // ]);
+        
+        // 新订单数据：
+        // newOrder.setStatus(2);  // 已生成
+        // newOrder.setPaymentMethod("wechat");  // 微信支付
+        // newOrder.setCreateTime(new Date("2024-01-01 10:00:00"));
+        // newOrder.setItems([
+        //   {productId:1, productName:"iPhone14", quantity:2, price:4999, productStatus:2},  // 修改了数量和状态
+        //   {productId:null, productName:"iPad", quantity:1, price:3999, productStatus:1},   // 新增
+        //   // 删除了productId=2的AirPods
+        // ]);
+        
+        // 更新业务逻辑...
+        oldOrder.setStatus(newOrder.getStatus());
+        oldOrder.setPaymentMethod(newOrder.getPaymentMethod());
+        oldOrder.setItems(newOrder.getItems());
+        
+        return orderRepository.save(oldOrder);
+    }
+}
+
+/*
+=== 执行后生成的审计日志 changes 字段内容（带枚举和日期格式化）===
+
+假设修改：
+1. 修改订单状态
+2. 修改支付方式
+3. 修改订单标签（基本类型列表 - 只用@AuditField）
+4. 修改配送方式（带枚举的基本类型列表 - 只用@AuditField）
+5. 修改商品明细（对象列表 - 用@AuditNested）
+
+生成的 changes 内容：
+
+[
+  "订单状态由[待生成]变成[已生成]",
+  "支付方式由[支付宝]变成[微信支付]",
+  "订单标签新增：活动促销",
+  "订单标签删除：新用户",
+  "配送方式新增：同城配送",
+  "配送方式删除：自提",
+  "关联订单ID新增：300",
+  "订单明细【ID=1】的数量由[1]变成[2]",
+  "订单明细【ID=1】的商品名称由[iPhone14]变成[iPhone 15]",
+  "订单明细【ID=1】的商品状态由[正常]变成[缺货]",
+  "新增订单明细：商品ID=3, 商品名称=iPad, 数量=1, 单价=3999.00, 商品状态=正常",
+  "删除订单明细：商品ID=2, 商品名称=AirPods, 数量=2, 单价=999.00, 商品状态=正常"
+]
+
+=== 详细示例数据 ===
+
+// 旧数据
+OrderItem item1 = new OrderItem();
+item1.setProductId(1L);
+item1.setProductName("iPhone14");
+item1.setQuantity(1);
+item1.setProductStatus(1);
+
+OrderItem item2 = new OrderItem();
+item2.setProductId(2L);
+item2.setProductName("AirPods");
+item2.setQuantity(2);
+item2.setProductStatus(1);
+
+oldOrder.setItems(Arrays.asList(item1, item2));
+
+// 新数据
+OrderItem newItem1 = new OrderItem();
+newItem1.setProductId(1L);
+newItem1.setProductName("iPhone 15");  // 名称改了
+newItem1.setQuantity(2);               // 数量改了
+newItem1.setProductStatus(2);          // 状态改了
+
+OrderItem newItem3 = new OrderItem();
+newItem3.setProductId(3L);
+newItem3.setProductName("iPad");
+newItem3.setQuantity(1);
+newItem3.setProductStatus(1);
+
+newOrder.setItems(Arrays.asList(newItem1, newItem3));  // item2被删除了
+
+变更日志：
+[
+  "订单明细【ID=1】的数量由[1]变成[2]",
+  "订单明细【ID=1】的商品名称由[iPhone14]变成[iPhone 15]",  // 名称也能追踪到变化
+  "订单明细【ID=1】的商品状态由[正常]变成[缺货]",
+  "新增订单明细：商品ID=3, 商品名称=iPad, 数量=1, 单价=3999.00, 商品状态=正常",
+  "删除订单明细：商品ID=2, 商品名称=AirPods, 数量=2, 单价=999.00, 商品状态=正常"
+]
+
+=== 优点说明 ===
+1. 使用ID标识：即使名称修改也能准确追踪是哪一项
+2. 名称变化也能记录：如果商品名称从"iPhone14"改成"iPhone 15"，也会记录这个变化
+3. 唯一准确：ID是数据库主键，不会重复，准确定位到具体记录
+4. 便于追溯：通过ID可以直接关联到数据库记录
+
+=== 注解使用对比 ===
+
+// ✅ 简化后（推荐）
+@AuditField(label = "订单标签")
+private List<String> tags;
+
+@AuditField(label = "配送方式", enums = {"1:快递", "2:自提", "3:同城配送"})
+private List<Integer> deliveryMethods;
+
+@AuditNested("订单明细")
+private List<OrderItem> items;
+
+=== 说明 ===
+1. 基本类型列表：只需@AuditField，系统自动识别
+2. 对象列表：使用@AuditNested，用ID标识具体项
+3. 枚举转换：@AuditField的enums属性对列表元素同样生效
+4. 支持的基本类型：String、Integer、Long、Double、Float、Boolean、BigDecimal
+5. 标识方式：统一使用【ID=xxx】格式，准确且不受其他字段变化影响
+*/
+
+// ==================== 9. 更复杂的嵌套示例 ====================
+
+@Data
+public class ComplexOrder {
+    @AuditField(label = "订单ID")
+    private Long id;
+    
+    @AuditField(label = "订单金额")
+    private BigDecimal totalAmount;
+    
+    @AuditNested("收货信息")
+    private ShippingInfo shippingInfo;
+    
+    @AuditNested("商品清单")
+    private List<OrderProduct> products;
+    
+    @AuditNested("优惠券")
+    private List<Coupon> coupons;
+}
+
+@Data
+class ShippingInfo {
+    @AuditField(label = "收货人")
+    private String receiver;
+    
+    @AuditField(label = "手机号")
+    private String phone;
+    
+    @AuditNested("地址信息")
+    private AddressDetail addressDetail;
+}
+
+@Data
+class AddressDetail {
+    @AuditField(label = "省")
+    private String province;
+    
+    @AuditField(label = "市")
+    private String city;
+    
+    @AuditField(label = "详细地址")
+    private String detail;
+}
+
+@Data
+class OrderProduct {
+    @AuditId  // 明确标识这是唯一ID
+    @AuditField(label = "商品ID")
+    private Long productId;
+    
+    @AuditField(label = "商品名称")
+    private String productName;
+    
+    @AuditField(label = "SKU")
+    private String sku;
+    
+    @AuditField(label = "数量")
+    private Integer quantity;
+    
+    @AuditField(label = "单价")
+    private BigDecimal price;
+}
+
+@Data
+class Coupon {
+    @AuditId  // 明确标识这是唯一ID
+    @AuditField(label = "优惠券ID")
+    private Long couponId;
+    
+    @AuditField(label = "优惠券名称")
+    private String couponName;
+    
+    @AuditField(label = "折扣金额")
+    private BigDecimal discountAmount;
+}
+
+// ==================== 10. @AuditNested优化说明 ====================
+
+/**
+ * @AuditNested 优化前后对比
+ */
+
+// ✅ 优化后（推荐）- 使用value简写
+@AuditNested("订单明细")
+private List<OrderItem> items;
+
+@AuditNested("收货地址")
+private Address address;
+
+// ✅ 优化后 - 使用label（效果相同）
+@AuditNested(label = "订单明细")
+private List<OrderItem> items;
+
+// ❌ 优化前（冗余）
+@AuditNested(label = "订单明细", itemLabel = "明细")
+private List<OrderItem> items;
+
+/**
+ * 变更日志示例：
+ * 
+ * 优化后的描述更加自然：
+ * - "新增订单明细：商品名称=iPad, 数量=1"
+ * - "删除订单明细：商品名称=AirPods, 数量=2"
+ * - "订单明细【iPhone14】的数量由[1]变成[2]"
+ * - "收货地址的收货人由[张三]变成[李四]"
+ * 
+ * 说明：
+ * 1. label既用于描述列表，也用于描述列表项
+ * 2. 不再需要单独的itemLabel参数
+ * 3. 支持value简写（Spring风格）
+ */
+
+// ==================== 10. 更多@AuditId使用场景 ====================
+
+/**
+ * 场景1：使用业务编号作为唯一标识
+ */
+@Data
+class InvoiceItem {
+    private Long id; // 数据库主键，但不用作对比标识
+    
+    @AuditId  // 使用业务编号作为唯一标识
+    @AuditField(label = "发票号")
+    private String invoiceNo;
+    
+    @AuditField(label = "金额")
+    private BigDecimal amount;
+    
+    @AuditField(label = "税率")
+    private BigDecimal taxRate;
+}
+
+/**
+ * 场景2：使用组合字段的其中一个
+ */
+@Data
+class StudentScore {
+    @AuditId  // 学生ID作为唯一标识
+    @AuditField(label = "学生ID")
+    private Long studentId;
+    
+    @AuditField(label = "学生姓名")
+    private String studentName;
+    
+    @AuditField(label = "科目")
+    private String subject;
+    
+    @AuditField(label = "分数")
+    private Integer score;
+}
+
+/**
+ * 场景3：没有自然主键，使用UUID
+ */
+@Data
+class LogEntry {
+    @AuditId  // 使用UUID作为唯一标识
+    @AuditField(label = "日志UUID")
+    private String uuid;
+    
+    @AuditField(label = "日志类型")
+    private String logType;
+    
+    @AuditField(label = "日志内容")
+    private String content;
+}
+
+/*
+=== 复杂嵌套修改示例的审计日志（使用ID标识）===
+
+假设修改：
+1. 修改订单金额
+2. 修改收货人手机号
+3. 修改地址的城市
+4. 商品列表：修改第一个商品的数量和名称、新增一个商品、删除一个商品
+5. 优惠券列表：新增一张优惠券
+
+生成的 changes 内容：
+
+[
+  "订单金额由[500.00]变成[800.00]",
+  "收货信息的手机号由[13800138000]变成[13900139000]",
+  "收货信息的地址信息的市由[北京市]变成[上海市]",
+  "商品清单【ID=1】的数量由[1]变成[2]",
+  "商品清单【ID=1】的商品名称由[iPhone 14]变成[iPhone 15]",
+  "新增商品清单：商品ID=3, 商品名称=MacBook Pro, SKU=MB-001, 数量=1, 单价=12999.00",
+  "删除商品清单：商品ID=2, 商品名称=AirPods Pro, SKU=AP-001, 数量=1, 单价=1999.00",
+  "新增优惠券：优惠券ID=5, 优惠券名称=新用户立减券, 折扣金额=50.00"
+]
+
+说明：
+- 使用【ID=1】标识具体是哪一项，即使商品名称修改了也能准确定位
+- 商品名称的修改也能被完整记录下来
+- ID是唯一且不变的，避免名称重复或修改带来的混淆
+*/
+
+// ==================== 6. 审计日志查询示例 ====================
+
+@RestController
+@RequestMapping("/api/audit")
+public class AuditLogController {
+    
+    @Autowired
+    private AuditLogRepository auditLogRepository;
+    
+    @Autowired
+    private ObjectMapper objectMapper;
+    
+    @GetMapping("/logs/{businessId}")
+    public List<AuditLogVO> getAuditLogs(@PathVariable String businessId) throws Exception {
+        List<AuditLogEntity> logs = auditLogRepository.findByBusinessIdOrderByOperateTimeDesc(businessId);
+        
+        List<AuditLogVO> result = new ArrayList<>();
+        for (AuditLogEntity log : logs) {
+            AuditLogVO vo = new AuditLogVO();
+            vo.setModule(log.getModule());
+            vo.setOperation(log.getOperation());
+            vo.setOperator(log.getOperator());
+            vo.setOperateTime(log.getOperateTime());
+            vo.setChanges(objectMapper.readValue(log.getChanges(), 
+                new TypeReference<List<String>>() {}));
+            result.add(vo);
+        }
+        return result;
+    }
+}
+
+@Data
+class AuditLogVO {
+    private String module;
+    private String operation;
+    private String operator;
+    private LocalDateTime operateTime;
+    private List<String> changes;
+}
+
+// ==================== 7. 数据库建表SQL ====================
+/*
+CREATE TABLE `audit_log` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `module` VARCHAR(50) COMMENT '模块',
+  `operation` VARCHAR(50) COMMENT '操作',
+  `business_id` VARCHAR(100) COMMENT '业务ID',
+  `changes` JSON COMMENT '变更内容',
+  `operator` VARCHAR(100) COMMENT '操作人',
+  `operate_time` DATETIME NOT NULL COMMENT '操作时间',
+  `ip_address` VARCHAR(50) COMMENT 'IP地址',
+  PRIMARY KEY (`id`),
+  KEY `idx_business_id` (`business_id`),
+  KEY `idx_operate_time` (`operate_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='审计日志表';
+
+-- 示例审计日志数据：
+{
+  "module": "订单管理",
+  "operation": "修改订单",
+  "businessId": "123",
+  "changes": [
+    "订单金额由[100.00]变成[200.00]",
+    "订单状态由[1]变成[2]",
+    "收货地址的收货人由[张三]变成[李四]",
+    "收货地址的联系电话由[13800138000]变成[13900139000]",
+    "新增明细：商品名称=iPhone 15, 数量=1, 单价=5999.00",
+    "删除明细：商品名称=iPhone 14, 数量=1, 单价=4999.00",
+    "明细的数量由[2]变成[3]"
+  ],
+  "operator": "admin",
+  "operateTime": "2024-12-25 10:30:00"
+}
+*/
